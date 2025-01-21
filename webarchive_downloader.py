@@ -1,18 +1,9 @@
 import argparse
 import requests
 import time
-import socket
-import urllib3
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from itertools import cycle
 
-# Configure Cloudflare DNS
-def set_cloudflare_dns():
-    def custom_dns_resolver(hostname, port, family=socket.AF_INET):
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('1.1.1.1', 443))]
-    socket.getaddrinfo = custom_dns_resolver
-
-# Display banner
+# Display ASCII Art Banner
 def display_banner():
     print("""
  /$$$$$$$            /$$                             /$$              
@@ -27,9 +18,13 @@ def display_banner():
                                                                       
     """)
 
-# Function to download URLs
-def download_urls(domain, output_file, retries=3, timeout=20):
+# Download URLs
+def download_urls(domain, output_file, proxies=None, retries=3, timeout=20):
+    """Download all URLs and parameters for a given domain from web.archive.org."""
     url = "https://web.archive.org/cdx/search/cdx"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     params = {
         "url": f"*.{domain}/*",
         "collapse": "urlkey",
@@ -37,40 +32,52 @@ def download_urls(domain, output_file, retries=3, timeout=20):
         "fl": "original"
     }
 
-    session = requests.Session()
-    retry_strategy = Retry(
-        total=retries,
-        backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"]
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("https://", adapter)
+    proxy_cycle = cycle(proxies) if proxies else None
 
-    try:
-        response = session.get(url, params=params, timeout=timeout)
-        response.raise_for_status()
+    for attempt in range(retries):
+        try:
+            proxy = {"http": next(proxy_cycle), "https": next(proxy_cycle)} if proxy_cycle else None
+            response = requests.get(url, headers=headers, params=params, timeout=timeout, proxies=proxy)
+            response.raise_for_status()
 
-        with open(output_file, "a") as f:
-            for line in response.text.splitlines():
-                f.write(f"{line}\\n")
+            # Write results to output file
+            with open(output_file, "a") as f:
+                for line in response.text.splitlines():
+                    f.write(f"{line}\\n")
 
-        print(f"[+] Successfully downloaded URLs for domain: {domain}")
-    except (requests.RequestException, urllib3.exceptions.RequestError) as e:
-        print(f"[-] Failed to download URLs for domain: {domain}. Error: {e}")
+            print(f"[+] Successfully downloaded URLs for domain: {domain}")
+            return  # Exit the function if successful
 
-# Main function
+        except requests.RequestException as e:
+            print(f"[-] Attempt {attempt + 1} failed for domain: {domain}. Error: {e}")
+            if attempt < retries - 1:  # Wait before retrying, if attempts remain
+                time.sleep(2)
+            else:
+                print(f"[-] Giving up on domain: {domain} after {retries} attempts.")
+
+# Main Function
 def main():
-    set_cloudflare_dns()
     display_banner()
-
     parser = argparse.ArgumentParser(description="Download all URLs and parameters from web.archive.org for domains.")
     parser.add_argument("-f", "--file", required=True, help="Input file containing root domains, one per line.")
     parser.add_argument("-o", "--output", required=True, help="Output file to save all results.")
+    parser.add_argument("-p", "--proxies", help="Optional: File containing proxy list (one per line).")
 
     args = parser.parse_args()
     input_file = args.file
     output_file = args.output
+    proxy_file = args.proxies
+
+    # Load proxies
+    proxies = None
+    if proxy_file:
+        try:
+            with open(proxy_file, "r") as f:
+                proxies = [line.strip() for line in f if line.strip()]
+            print(f"[+] Loaded {len(proxies)} proxies.")
+        except FileNotFoundError:
+            print(f"[-] Proxy file not found: {proxy_file}")
+            return
 
     # Read domains from input file
     try:
@@ -82,7 +89,7 @@ def main():
 
     # Process each domain with throttling
     for domain in domains:
-        download_urls(domain, output_file)
+        download_urls(domain, output_file, proxies)
         time.sleep(1)  # Throttle requests to avoid rate limiting
 
 if __name__ == "__main__":
